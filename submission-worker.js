@@ -58,10 +58,13 @@ const persistDataRecord = async (dataObject, environmentBindings) => {
 	});
 
 	// now we need some question marks for the sql query
+	// we use placeholders (?) instead of putting variables directly in the string
+	// this is a security best practice to prevent "sql injection" attacks
+	// it makes sure the database treats the user input as just text, not as code
 	const placeholderArray = columnNames.map(() => {
-		return '?'; // just a placeholder so nobody can hack our sql
+		return '?'; // just a placeholder
 	});
-	const valuePlaceholders = placeholderArray.join(', '); // join em with commas like "?, ?, ?"
+	const valuePlaceholders = placeholderArray.join(', '); // join with commas like "?, ?, ?"
 
 	// building the actual sql string here
 	const columnsString = columnNames.join(', '); // join column names with commas too
@@ -174,7 +177,7 @@ const validateSecurity = async (turnstileToken, environmentBindings) => {
 		return 'Bot verification failed.'; // cf thinks its a bot so we block it
 	}
 
-	return null; // no errors found, user is cool
+	return null; // no errors found, user is normal
 };
 
 // validateFields: checks every field against our config rules
