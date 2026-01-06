@@ -1,78 +1,64 @@
-// global field config
-// this is where we setup all the fields for the database and validation
 const submissionRegistry = [
 	{
-		dbKey: 'name', // this is the name of the column in our database
-		presenceRequired: true, // means the user MUST type something here
-		maxCharacterLimit: 3, // only allow 3 letters so they dont break stuff
-		alphabeticOnlyPattern: /^[a-zA-Z]+$/, // only allow real letters, no numbers or weird symbols
+		key: 'name', // this is the 'name' column in db
+		presenceRequired: true,
+		maxCharacterLimit: 3,
+		regex: /^[a-zA-Z]+$/,
 	},
 	{
-		dbKey: 'content', // another column for the actual message
-		presenceRequired: true, // also mandatory
-		maxCharacterLimit: 3, // keep it short too
-		alphabeticOnlyPattern: /^[a-zA-Z]+$/, // letters only again
+		key: 'content', 
+		presenceRequired: true,
+		maxCharacterLimit: 3, 
+		regex: /^[a-zA-Z]+$/,
 	},
 ];
 
-// internal utility functions
-// just some helper stuff for the main code to use
-
-// verifySecurityToken: checking if the user is a real human or a bot
-const verifySecurityToken = async (userToken, environmentBindings) => {
-	const secretKey = environmentBindings.TURNSTILE_SECRET_KEY; // get our secret key from the settings
+// helpers
+const verifySecurityToken = async (userTurnstileToken, environmentBindings) => {
+	const secretKey = environmentBindings.TURNSTILE_SECRET_KEY;
 	const verifyUrl = 'https://challenges.cloudflare.com/turnstile/v0/siteverify'; // this is where we ask cloudflare if its a bot
 
-	// check if we even have a key
-	if (!secretKey) {
-		console.error('ERROR: TURNSTILE_SECRET_KEY is undefined in environment.'); // log a big error if its missing
-		return { success: false, 'error-codes': ['missing-configuration'] }; // tell the caller it failed cuz of config
+	if (!secretKey) { // ensure key 
+		console.error('ERROR: TURNSTILE_SECRET_KEY is undefined in environment.'); 
+		return { success: false, 'error-codes': ['missing-configuration'] }; 
 	}
 
-	// prep the data to send to cloudflare
-	const verificationPayload = new URLSearchParams({
-		secret: secretKey, // our secret key
-		response: userToken, // the token the user sent us
+	const turnstileVerificationPayload = new URLSearchParams({
+		secret: secretKey,
+		response: userTurnstileToken, 
 	});
 
-	// send the request to cloudflare
-	const apiResponse = await fetch(verifyUrl, {
-		body: verificationPayload, // put the data in the body
-		method: 'POST', // use post cuz we are sending data
+	const apiResponse = await fetch(verifyUrl, { // send request, await 
+		body: turnstileVerificationPayload, 
+		method: 'POST', 
 	});
 
-	// get the answer back as json
 	const verificationResult = await apiResponse.json(); // wait for the json to parse
 	if (!verificationResult.success) {
-		console.error('VERIFICATION_FAILURE:', verificationResult['error-codes']); // log if cloudflare says no
+		console.error('VERIFICATION_FAILURE:', verificationResult['error-codes']); 
 	}
 
-	return verificationResult; // return the whole result object
+	return verificationResult; // return result obj
 };
 
-// persistDataRecord: saves a new entry into our d1 database
-const persistDataRecord = async (dataObject, environmentBindings) => {
-	// lets get the column names first
+const persistDataRecord = async (dataObject, environmentBindings, tableName) => { // save new entry 
 	const columnNames = submissionRegistry.map((field) => {
-		return field.dbKey; // this gets the db key for each field in our list
+		return field.key; // this gets the db key for each field in our list
 	});
 
-	// now we need some question marks for the sql query
-	// we use placeholders (?) instead of putting variables directly in the string
-	// this is a security best practice to prevent "sql injection" attacks
-	// it makes sure the database treats the user input as just text, not as code
-	const placeholderArray = columnNames.map(() => {
-		return '?'; // just a placeholder
-	});
-	const valuePlaceholders = placeholderArray.join(', '); // join with commas like "?, ?, ?"
+	const columnsString = columnNames.map(name => `"${name}"`).join(', '); // join each element with commas to avoid reserved word issues
 
-	// building the actual sql string here
-	const columnsString = columnNames.join(', '); // join column names with commas too
-	const insertSql = `INSERT INTO entries (${columnsString}) VALUES (${valuePlaceholders});`; // the big insert query string
+	const valuePlaceholders = new Array(columnNames.length).fill('?').join(', '); // e.g new Array(2).fill('?') -> ['?', '?'] -> "?, ?"
+		// new Array(2) creates a double, then we .fill with ?, then we .join with commas which then makes a string instead of a double
+		// .join only puts commas between items, so better than doing a for loop. Also looks nicer too 
 
-	// mapping the data to the right order so it matches the columns
+	const insertSql = `INSERT INTO ${tableName} (${columnsString}) VALUES (${valuePlaceholders});`; 
+		// the valueplaceholders makes the insert string look like: `INSERT INTO "entries" ("name", "content") VALUES (?, ?);`, which is nice.
+
 	const orderedValues = columnNames.map((key) => {
-		return dataObject[key]; // gets the actual value from the user data
+		// if key name, look at dataObject['name'] and finds "name"
+		// if key content, look at dataObject['content'] and finds "content"
+		return dataObject[key]; // return ["name", "content"]
 	});
 
 	// finally running the db command
@@ -84,165 +70,158 @@ const persistDataRecord = async (dataObject, environmentBindings) => {
 };
 
 // retrieveAllRecords: gets everything out of the database
-const retrieveAllRecords = async (environmentBindings) => {
-	// getting the keys we need to select
+const retrieveAllRecords = async (environmentBindings, tableName) => {
+	
+	// pull the key field(s) from the submissionRegistry
 	const columnKeysArray = submissionRegistry.map((field) => {
-		return field.dbKey; // grab the db key for each column
+		return field.key; // returns ['name', 'content'] in this case
 	});
 
 	// join them up for the select statement
-	const selectKeys = columnKeysArray.join(', '); // make a comma separated list of columns
+	const selectKeys = columnKeysArray.join(', '); // make a comma separated list of columns, like "name, content"
 
 	// build the select query
-	const selectSql = `SELECT ${selectKeys} FROM entries;`; // get all columns from the entries table
+	const selectSqlcmd = `SELECT ${selectKeys} FROM ${tableName};`; // ask db for all rows, but only specific keys 
 
-	// talk to the database
-	const preparedStatement = environmentBindings.D1.prepare(selectSql); // prep the select query
-	const queryResult = await preparedStatement.all(); // get all the rows at once
+	const preparedStatement = environmentBindings.D1.prepare(selectSqlcmd); // send cmd to db
+	const queryResult = await preparedStatement.all(); // await tells to execute the command and save the result 
 
-	// check if it actually worked or if the db crashed
 	if (!queryResult.success) {
-		throw new Error('Database archival retrieval failed.'); // oops something went wrong big time
+		throw new Error('Database retrieval failed.');
 	}
 
-	// make sure we return an array even if its empty
 	let results; // variable to hold our list of data
 	if (queryResult.results) {
-		results = queryResult.results; // if we got data, use it
+		results = queryResult.results; 
 	} else {
-		results = []; // if no data, just make it an empty list so it dont crash
+		results = []; // return empty list if no data 
 	}
 	return results; // return the list of rows
 };
 
-// handlePostRequest: handles when someone submits the form
 const handlePostRequest = async (incomingRequest, environmentBindings, standardJsonResponseHeaders) => {
 	try {
 		const requestPayload = await incomingRequest.json(); // parse the json data from the request
-		const { turnstileToken } = requestPayload; // grab the token for security checks
+		//e.g. 
+		// {
+		// 	"name": "Ant",
+		// 	"content": "hi",
+		// 	"turnstileToken": "tokenstirng00000"
+		// }
+		const turnstileToken = requestPayload.turnstileToken; // get the turnstileToken member from the JSON 
 
-		// do the security check to stop bots
-		const securityError = await validateSecurity(turnstileToken, environmentBindings); // check if its a bot or not
-		if (securityError) {
-			return new Response(JSON.stringify({ error: securityError }), {
-				status: 400, // bad request if security fails
-				headers: standardJsonResponseHeaders, // send back our standard headers
+		const validateSecurityResult = await validateSecurity(turnstileToken, environmentBindings);
+		if (validateSecurityResult) { // not null, bad token maybe 
+			return new Response(JSON.stringify({ error: validateSecurityResult }), {
+				status: 400,
+				headers: standardJsonResponseHeaders,
 			});
 		}
 
-		// check all the fields to make sure they are valid
 		const validationError = validateFields(requestPayload); // check if the data is gud and follows rules
 		if (validationError) {
 			return new Response(JSON.stringify({ error: validationError }), {
-				status: 400, // bad request if validation fails
-				headers: standardJsonResponseHeaders, // send back headers again
+				status: 400,
+				headers: standardJsonResponseHeaders,
 			});
 		}
 
-		// save to the database now that its clean
-		const sanitizedEntry = {}; // new object for clean data only
-		submissionRegistry.forEach((field) => {
-			sanitizedEntry[field.dbKey] = requestPayload[field.dbKey]; // copy only the fields we allow
-		});
+		const sanitizedEntry = {}; // init new object 
+		submissionRegistry.forEach((field) => { // iterate each key in the registry
+			if (requestPayload[field.key] !== undefined && requestPayload[field.key] !== null) { // if data neq undefined and null,
+				sanitizedEntry[field.key] = requestPayload[field.key]; // set it 
+			} else {
+				sanitizedEntry[field.key] = null; // otherwise set null, if data missing 
+			}
+		}); // we iterate each key in the registry, then look for a matching key in the payload. Key is the same, then we set the data. 
+			//e.g
+				// Input (requestPayload): {"name": "Ant", "hacker_tool": "virus"}
+				// submissionRegistry: ['name', 'content']
+				// Output (sanitizedEntry): {"name": "Ant", "content": null}
 
-		await persistDataRecord(sanitizedEntry, environmentBindings); // save it to the d1 database for real
+		await persistDataRecord(sanitizedEntry, environmentBindings, 'entries'); // save into d1
 
 		return new Response(JSON.stringify({ success: true }), {
-			status: 200, // all good!
-			headers: standardJsonResponseHeaders, // send back success msg
+			status: 200, // OK 
+			headers: standardJsonResponseHeaders,
 		});
 	} catch (error) {
 		return new Response(JSON.stringify({ error: 'Ingestion failed', message: error.message }), {
-			status: 500, // server error if somthing broke in the code
-			headers: standardJsonResponseHeaders, // send back error msg
+			status: 500,
+			headers: standardJsonResponseHeaders,
 		});
 	}
 };
 
-// validateSecurity: helper to check turnstile
 const validateSecurity = async (turnstileToken, environmentBindings) => {
-	// check if turnstile is even turned on in the settings
 	if (environmentBindings.USETURNSTILE === '0') {
-		return null; // its off so just skip the check
+		return null;
 	}
 
-	// make sure the user actually sent a token
 	if (!turnstileToken) {
-		return 'Security token required.'; // gotta have a token or we dont trust u
+		return 'Security token required.';
 	}
 
-	// verify the token with cloudflare's api
 	const securityOutcome = await verifySecurityToken(turnstileToken, environmentBindings); // wait for cf to reply
 	if (!securityOutcome.success) {
-		return 'Bot verification failed.'; // cf thinks its a bot so we block it
+		return 'Bot verification failed.';
 	}
 
-	return null; // no errors found, user is normal
+	return null; 
 };
 
-// validateFields: checks every field against our config rules
 const validateFields = (requestPayload) => {
-	// loop through each field in our config list
-	for (const fieldDefinition of submissionRegistry) {
-		const userInput = requestPayload[fieldDefinition.dbKey]; // get what the user typed for this field
-		const fieldId = fieldDefinition.dbKey; // the name/id of the field
+	for (const field of submissionRegistry) { // loop through each field in our config list
+		const userInput = requestPayload[field.key]; 
+		const fieldId = field.key;
 
-		// check if its missing but required
-		if (fieldDefinition.presenceRequired && !userInput) {
-			return `Missing required field: ${fieldId}`; // error if its empty when it shouldnt be
+		if (field.presenceRequired && !userInput) {
+			return `Missing required field: ${fieldId}`;
 		}
 
-		// check if its too long (too many characters)
-		if (userInput && userInput.length > fieldDefinition.maxCharacterLimit) {
-			return `Length exceeded for field: ${fieldId}`; // error if they typed too much
+		if (userInput && userInput.length > field.maxCharacterLimit) {
+			return `Length exceeded for field: ${fieldId}`;
 		}
 
-		// check if it has weird characters that arent letters
-		if (userInput && fieldDefinition.alphabeticOnlyPattern && !fieldDefinition.alphabeticOnlyPattern.test(userInput)) {
-			return `Invalid characters in field: ${fieldId}`; // error if not just abc letters
+		if (userInput && field.regex && !field.regex.test(userInput)) {
+			return `Invalid characters in field: ${fieldId}`; // error if not just a..z letters
 		}
 	}
-	return null; // everything looks fine to me
+	return null;
 };
 
 export default {
 	// this is the main part of the worker that handles requests
 	async fetch(incomingRequest, environmentBindings, context) {
-		// setup some headers for cross-origin stuff (cors)
 		const accessControlHeaders = {
 			'Access-Control-Allow-Origin': 'https://anthonyis.online', // only allow my website to call this
 			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', // allow these types of requests
 			'Access-Control-Allow-Headers': 'Content-Type', // allow the content-type header
 		};
 
-		// standard headers for our json responses
 		const standardJsonResponseHeaders = {
-			'Content-Type': 'application/json', // tell the browser we are sending json
-			...accessControlHeaders, // add the cors headers too
+			'Content-Type': 'application/json',
+			...accessControlHeaders, // like a header file, pull accessControlHeaders and paste it here 
 		};
 
-		// handle options requests for cors preflight
 		if (incomingRequest.method === 'OPTIONS') {
 			return new Response(null, { 
-				status: 204, // 204 means "no content" which is fine for options
-				headers: accessControlHeaders // send back the cors headers
+				status: 204, // 204 means "no content" https://en.wikipedia.org/wiki/List_of_HTTP_status_codes
+				headers: accessControlHeaders
 			});
 		}
 
-		// handle get requests to show all the data
 		if (incomingRequest.method === 'GET') {
 			try {
-				// try to get everything from the database
-				const databaseSnapshot = await retrieveAllRecords(environmentBindings); // wait for the db to give us rows
+				const databaseSnapshot = await retrieveAllRecords(environmentBindings, 'entries'); // wait for the db to give us rows
 				return new Response(JSON.stringify(databaseSnapshot), {
-					status: 200, // 200 means success
+					status: 200, 
 					headers: standardJsonResponseHeaders, // send back the data as json
 				});
 			} catch (error) {
-				// if something breaks during the get request
 				return new Response(JSON.stringify({ error: 'Retrieval failed', message: error.message }), {
-					status: 500, // 500 is a generic server error
-					headers: standardJsonResponseHeaders, // send back the error info
+					status: 500,
+					headers: standardJsonResponseHeaders,
 				});
 			}
 		}
